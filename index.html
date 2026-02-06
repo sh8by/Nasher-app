@@ -3,56 +3,46 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ناشر - Batch Quran Video Creator</title>
-    
+    <title>ناشر (Nasher) - Batch Creator</title>
     <script src="coi-serviceworker.js"></script>
     <script src="https://unpkg.com"></script>
     <script src="https://cdn.jsdelivr.net"></script>
-    <script src="https://cdn.jsdelivr.net"></script>
-
     <style>
         body { background: #001f3f; color: white; font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; }
         .container { max-width: 550px; margin: auto; border: 2px solid #ff851b; padding: 25px; border-radius: 15px; background: rgba(0,0,0,0.3); }
         input, select, button { width: 100%; margin: 8px 0; padding: 12px; border-radius: 8px; border: none; font-size: 16px; box-sizing: border-box; }
         button { background: #ff851b; color: white; font-weight: bold; cursor: pointer; }
-        button:disabled { background: #555; }
+        .checkbox-group { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 10px 0; }
         #progress-container { width: 100%; background: #ddd; border-radius: 5px; margin-top: 15px; display: none; }
         #progress-bar { width: 0%; background: #ff851b; height: 25px; border-radius: 5px; transition: width 0.3s; }
         video { width: 100%; margin-top: 20px; border-radius: 10px; display: none; border: 2px solid #ff851b; }
     </style>
-    
 </head>
 <body>
-
     <div class="container">
-        <h1>ناشر (Nasher) - Batch Mode</h1>
-        
-        <label>1. Background Video</label>
+        <h1>ناشر (Nasher)</h1>
         <input type="file" id="video-upload" accept="video/*">
-        
-        <label>2. Reciter</label>
         <select id="reciter">
             <option value="ar.alafasy">Mishary Rashid Alafasy</option>
             <option value="ar.husary">Mahmoud Khalil Al-Husary</option>
             <option value="ar.abdulsamad">Abdul Basit Abdul Samad</option>
         </select>
-
-        <label>3. Verse Range</label>
         <div style="display: flex; gap: 10px;">
             <input type="number" id="surah" placeholder="Surah" min="1" max="114">
             <input type="number" id="start-ayah" placeholder="From Ayah" min="1">
             <input type="number" id="end-ayah" placeholder="To Ayah" min="1">
         </div>
-
+        <div class="checkbox-group">
+            <input type="checkbox" id="show-ayah-num" style="width:auto;">
+            <label for="show-ayah-num">Show Ayah Numbers (e.g. 1:1)</label>
+        </div>
         <button id="render-btn" onclick="processBatch()">Generate Full Video</button>
-        <button id="download-btn" style="display:none; background:#2ecc40;" onclick="downloadVideo()">Download Result</button>
-        
         <div id="progress-container">
             <div id="progress-bar"></div>
-            <p id="status" style="margin-top:5px; font-size:14px; color:#ffdc00;">Starting...</p>
+            <p id="status" style="margin-top:5px; font-size:14px; color:#ffdc00;">Ready</p>
         </div>
-
         <video id="output-video" controls></video>
+        <button id="download-btn" style="display:none; background:#2ecc40; margin-top:10px;" onclick="downloadVideo()">Download Video</button>
     </div>
 
     <script>
@@ -70,85 +60,78 @@
 
         let renderedUrl = "";
 
+        async function getDuration(file) {
+            const audio = document.createElement('audio');
+            audio.src = URL.createObjectURL(file);
+            return new Promise(resolve => {
+                audio.onloadedmetadata = () => resolve(audio.duration);
+            });
+        }
+
         async function processBatch() {
-            const btn = document.getElementById('render-btn');
             const status = document.getElementById('status');
             const videoInput = document.getElementById('video-upload').files;
             const surah = document.getElementById('surah').value;
             const start = parseInt(document.getElementById('start-ayah').value);
             const end = parseInt(document.getElementById('end-ayah').value);
             const reciter = document.getElementById('reciter').value;
+            const showAyahNum = document.getElementById('show-ayah-num').checked;
 
-            if (!videoInput[0] || !surah || !start || !end) return alert("Fill all fields!");
+            if (!videoInput.length || !surah || !start || !end) return alert("Fill all fields!");
 
-            btn.disabled = true;
             document.getElementById('progress-container').style.display = 'block';
+            if (!ffmpeg.isLoaded()) await ffmpeg.load();
 
             try {
-                if (!ffmpeg.isLoaded()) await ffmpeg.load();
-
-                // 1. Fetch all Ayahs and Audios
+                let totalDuration = 0;
+                let filter = "";
                 const audioFiles = [];
-                let filterComplex = "";
-                let concatInput = "";
 
                 for (let i = start; i <= end; i++) {
                     status.innerText = `Fetching Ayah ${i}...`;
                     const res = await fetch(`https://api.alquran.cloud{surah}:${i}/${reciter}`);
                     const data = await res.json();
                     
-                    const audioName = `audio${i}.mp3`;
-                    ffmpeg.FS('writeFile', audioName, await fetchFile(data.data.audio));
-                    audioFiles.push(audioName);
-
-                    const reshaped = arabicReshaper.reshape(data.data.text);
-                    const finalStr = reshaped.split('').reverse().join('');
+                    const audioBlob = await fetch(data.data.audio).then(r => r.blob());
+                    const duration = await getDuration(audioBlob);
                     
-                    // Simple logic: We merge audios first, then apply text
-                    // For batching, we will concat all audios into one stream
-                    concatInput += `-i ${audioName} `;
+                    const name = `a${i}.mp3`;
+                    ffmpeg.FS('writeFile', name, await fetchFile(audioBlob));
+                    audioFiles.push(name);
+
+                    const reshaped = arabicReshaper.reshape(data.data.text).split('').reverse().join('');
+                    const ayahLabel = showAyahNum ? ` [${surah}:${i}]` : "";
+                    const fullText = reshaped + ayahLabel;
+
+                    const s = totalDuration, e = s + duration;
+                    filter += `${filter ? ',' : ''}drawtext=fontfile=font.ttf:text='${fullText}':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h-text_h)/1.5:box=1:boxcolor=black@0.4:enable='between(t,${s},${e})'`;
+                    totalDuration += duration;
                 }
 
-                status.innerText = "Processing Background Video...";
                 ffmpeg.FS('writeFile', 'bg.mp4', await fetchFile(videoInput[0]));
                 ffmpeg.FS('writeFile', 'font.ttf', await fetchFile('Amiri-Regular.ttf'));
 
-                // 2. Combine Audios and Overlay Text (Simplified for batch)
-                // Note: More complex filters are needed for per-ayah timing, 
-                // but this script merges the full recitation over the loop.
-                status.innerText = "Rendering Final Video...";
-                
-                // Concat all audios first
+                status.innerText = "Merging Recitations...";
                 const audioInputs = audioFiles.map(f => ['-i', f]).flat();
-                await ffmpeg.run(...audioInputs, '-filter_complex', `concat=n=${audioFiles.length}:v=0:a=1[a]`, '-map', '[a]', 'full_audio.mp3');
+                await ffmpeg.run(...audioInputs, '-filter_complex', `concat=n=${audioFiles.length}:v=0:a=1[a]`, '-map', '[a]', 'audio.mp3');
 
-                // Final Merge
-                await ffmpeg.run(
-                    '-stream_loop', '-1', '-i', 'bg.mp4',
-                    '-i', 'full_audio.mp3',
-                    '-vf', `drawtext=fontfile=font.ttf:text='Surah ${surah}':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h-text_h)/2`,
-                    '-c:v', 'libx264', '-c:a', 'aac', '-map', 0, '-map', '1:a', '-shortest', 'out.mp4'
-                );
+                status.innerText = "Encoding Final Video...";
+                await ffmpeg.run('-stream_loop', '-1', '-i', 'bg.mp4', '-i', 'audio.mp3', '-vf', filter, '-c:v', 'libx264', '-c:a', 'aac', '-map', '0:v', '-map', '1:a', '-shortest', 'out.mp4');
 
                 const data = ffmpeg.FS('readFile', 'out.mp4');
                 renderedUrl = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
-                document.getElementById('output-video').src = renderedUrl;
-                document.getElementById('output-video').style.display = 'block';
+                const video = document.getElementById('output-video');
+                video.src = renderedUrl;
+                video.style.display = 'block';
                 document.getElementById('download-btn').style.display = 'block';
-                status.innerText = "Done!";
-
-            } catch (e) {
-                status.innerText = "Error: " + e.message;
-                console.error(e);
-            } finally {
-                btn.disabled = false;
-            }
+                status.innerText = "Complete!";
+            } catch (e) { status.innerText = "Error: " + e.message; }
         }
 
         function downloadVideo() {
             const a = document.createElement('a');
             a.href = renderedUrl;
-            a.download = "quran_batch_video.mp4";
+            a.download = "nasher_batch.mp4";
             a.click();
         }
     </script>
